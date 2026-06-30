@@ -1,6 +1,8 @@
-from django.urls import path
-from .views import cast_vote
+"""
+Voting URLs — intentionally empty.
 
-urlpatterns = [
-    path("vote/", cast_vote),
-]
+All voting URLs are nested under the polls app:
+    POST /api/v1/polls/<slug>/vote/
+"""
+
+urlpatterns = []
