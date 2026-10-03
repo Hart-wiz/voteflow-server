@@ -12,6 +12,8 @@ Frontend wallet response expects:
 """
 
 import uuid
+from decimal import Decimal
+
 from django.conf import settings
 from django.db import models
 
@@ -70,9 +72,13 @@ class Wallet(models.Model):
         related_name="wallet",
     )
 
-    balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    pending_earnings = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    lifetime_earnings = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    balance = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal(0))
+    pending_earnings = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal(0)
+    )
+    lifetime_earnings = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal(0)
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -118,7 +124,8 @@ class Transaction(models.Model):
         max_length=20, choices=Status.choices, default=Status.COMPLETED
     )
     type = models.CharField(
-        max_length=20, choices=Type.choices,
+        max_length=20,
+        choices=Type.choices,
     )
 
     # Optional metadata (bank details for withdrawals, payment ref for earnings)
@@ -127,12 +134,12 @@ class Transaction(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["-created_at"]
-        indexes = [
+        ordering = ("-created_at",)
+        indexes = (
             models.Index(fields=["user", "created_at"]),
             models.Index(fields=["type"]),
             models.Index(fields=["status"]),
-        ]
+        )
 
     def __str__(self):
         return f"{self.type} {self.amount} ({self.status})"

@@ -1,0 +1,49 @@
+[project]
+name = "voteflow-server"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "annotated-types==0.8.0",
+    "asgiref==3.11.1",
+    "certifi==2026.7.22",
+    "cffi==2.1.1",
+    "charset-normalizer==3.5.1",
+    "cloudinary==1.42.0",
+    "contextlib2==21.6.0",
+    "cryptography==50.0.1",
+    "django==6.0.6",
+    "django-cloudinary-storage==0.3.0",
+    "django-cors-headers==4.9.0",
+    "django-filter==25.2",
+    "django-ninja==1.7.1",
+    "django-ninja-extra==0.31.7",
+    "django-ninja-jwt==5.4.5",
+    "idna==3.20",
+    "injector==0.24.0",
+    "pillow>=12.3.0",
+    "psycopg[binary]>=3.3.6",
+    "pycparser==3.0",
+    "pydantic==2.13.5",
+    "pydantic-core==2.46.5",
+    "pydantic-settings==2.15.0",
+    "pyjwt>=2.13.0",
+    "python-decouple==3.8",
+    "python-dotenv==1.2.3",
+    "requests==2.34.2",
+    "six==1.17.0",
+    "sqlparse==0.5.5",
+    "typing-extensions==4.16.0",
+    "typing-inspection==0.4.4",
+    "tzdata==2026.2",
+    "urllib3==2.8.0",
+]
+
+[dependency-groups]
+dev = [
+    "django-stubs>=6.1.1",
+]
+
+[tool.ruff]
+extend-exclude = ["**/migrations/*"]

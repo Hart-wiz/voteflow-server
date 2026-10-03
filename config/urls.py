@@ -14,13 +14,29 @@ Route map:
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
-from django.urls import include, path
+from django.urls import path
+from ninja import NinjaAPI
+
+from accounts.api import router as auth_router
+from payments.api import router as payments_router
+from polls.api import router as polls_router
+
+# from polls.
+api = NinjaAPI(title="VoteFlow API", version="1.0.0", urls_namespace="api-v1")
+
+api.add_router("/auth/", auth_router)
+api.add_router("/polls/", polls_router)
+api.add_router("/wallet/", payments_router)
+
+
+# api.add_router("/polls/")
+api_v1_patterns = [
+    path("admin/", admin.site.urls),
+    path("", api.urls),  # Django Ninja endpoints & docs sit perfectly here
+]
 
 urlpatterns = [
-    path("admin/", admin.site.urls),
-    path("api/v1/auth/", include("accounts.urls")),
-    path("api/v1/polls/", include("polls.urls")),
-    path("api/v1/wallet/", include("payments.urls")),
+    path("api/v1/", api.urls),
 ]
 
 # Serve media files in development

@@ -13,9 +13,22 @@ Frontend expects Contestant:
 """
 
 import uuid
+from decimal import Decimal
+from typing import TYPE_CHECKING, ClassVar
+
 from django.conf import settings
+
+# from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils.text import slugify
+
+from .validators import validate_iana_timezone
+
+if TYPE_CHECKING:
+    # Tell type checkers about reverse manager relations
+    from django.db.models.manager import RelatedManager
+
+    from .models import Contestant
 
 
 class Poll(models.Model):
@@ -25,7 +38,7 @@ class Poll(models.Model):
     Key design decisions:
     - `slug` is the public identifier used in URLs (not the UUID).
     - `status` drives frontend display logic; auto-slug generation prevents collisions.
-    - `tags` uses JSONField (list of strings) for MVP simplicity.
+    - `tags` uses JSONField (list of strings) for MVP simplicity.<
     - `votes_count` is a denormalized aggregate for fast list queries.
     """
 
@@ -44,6 +57,10 @@ class Poll(models.Model):
         related_name="polls",
         help_text="The user who created this poll.",
     )
+
+    creator_id: uuid.UUID
+    if TYPE_CHECKING:
+        contestants: RelatedManager[Contestant]
 
     title = models.CharField(max_length=255)
     slug = models.SlugField(unique=True, max_length=300, blank=True)
@@ -67,25 +84,26 @@ class Poll(models.Model):
 
     is_paid = models.BooleanField(default=False)
     price_per_vote = models.DecimalField(
-        max_digits=10, decimal_places=2, default=0, blank=True
+        max_digits=10, decimal_places=2, default=Decimal(0), blank=True
     )
 
     tags = models.JSONField(default=list, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["-created_at"]
-        indexes = [
+        ordering = ("-created_at",)
+        indexes = (
             models.Index(fields=["slug"]),
             models.Index(fields=["status"]),
             models.Index(fields=["category"]),
             models.Index(fields=["creator"]),
-        ]
+        )
 
     def save(self, *args, **kwargs):
         # Auto-generate slug from title if not set
-        if not self.slug:
+        if not self.slug and self.title:
             base_slug = slugify(self.title)
             slug = base_slug
             counter = 1
@@ -110,6 +128,133 @@ class Poll(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class Contest(models.Model):
+    """
+    A voting contest with lifecycle state management.
+    Renamed from Poll to reflect industry-standard terminology.
+
+    This model implements comprehensive state management, timezone-aware scheduling,
+    and configurable results visibility for production-grade voting applications.
+    """
+
+    class State(models.TextChoices):
+        DRAFT = "DRAFT", "Draft"
+        SCHEDULED = "SCHEDULED", "Scheduled"
+        LIVE = "LIVE", "Live"
+        PAUSED = "PAUSED", "Paused"
+        CLOSED = "CLOSED", "Closed"
+        CANCELLED = "CANCELLED", "Cancelled"
+        ARCHIVED = "ARCHIVED", "Archived"
+        SUSPENDED = "SUSPENDED", "Suspended"
+
+    class ResultsVisibility(models.TextChoices):
+        AFTER_CLOSE = "after_close", "After Close"
+        REAL_TIME = "real_time", "Real Time"
+        NEVER = "never", "Never"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    slug = models.SlugField(unique=True, max_length=300)
+
+    # Ownership
+    organizer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="contests",
+        help_text="The user who created and manages this contest.",
+    )
+
+    # Content
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    category = models.CharField(max_length=100, blank=True, default="")
+    image = models.ImageField(upload_to="contests/", blank=True, null=True)
+    tags = models.JSONField(default=list, blank=True)
+
+    # Lifecycle
+    state = models.CharField(
+        max_length=20,
+        choices=State.choices,
+        default=State.DRAFT,
+        help_text="Current lifecycle state of the contest.",
+    )
+
+    # Timezone-aware scheduling
+    timezone = models.CharField(
+        max_length=50,
+        default="UTC",
+        validators=[validate_iana_timezone],
+        help_text="IANA timezone identifier (e.g., 'America/New_York')",
+    )
+    start_time = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the contest is scheduled to start (timezone-aware).",
+    )
+    end_time = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the contest is scheduled to end (timezone-aware).",
+    )
+
+    # State timestamps
+    published_at = models.DateTimeField(
+        null=True, blank=True, help_text="When the contest transitioned to LIVE state."
+    )
+    closed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the contest transitioned to CLOSED state.",
+    )
+
+    # Results visibility
+    results_visibility = models.CharField(
+        max_length=20,
+        choices=ResultsVisibility.choices,
+        default=ResultsVisibility.AFTER_CLOSE,
+        help_text="Controls when results can be viewed by users.",
+    )
+
+    # Optimistic locking for state transitions
+    version = models.PositiveIntegerField(
+        default=0,
+        help_text="Version number for optimistic locking during state transitions.",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ["-created_at"]
+        indexes: ClassVar[list] = [
+            models.Index(fields=["state", "start_time"]),
+            models.Index(fields=["state", "end_time"]),
+            models.Index(fields=["organizer", "state"]),
+            models.Index(fields=["category"]),
+        ]
+        constraints: ClassVar[list] = [
+            models.CheckConstraint(
+                condition=(models.Q(end_time__gt=models.F("start_time"))),
+                name="valid_time_range",
+            )
+        ]
+
+    def save(self, *args, **kwargs):
+        """Auto-generate slug from title if not set."""
+        if not self.slug and self.title:
+            base_slug = slugify(self.title)
+            slug = base_slug
+            counter = 1
+            while Contest.objects.filter(slug=slug).exists():
+                slug = f"{base_slug}-{counter}"
+                counter += 1
+            self.slug = slug
+
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.title} ({self.state})"
 
 
 class Contestant(models.Model):
@@ -142,10 +287,8 @@ class Contestant(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["-votes"]
-        indexes = [
-            models.Index(fields=["poll"]),
-        ]
+        ordering = ("-votes",)
+        indexes = (models.Index(fields=["poll"]),)
 
     def __str__(self):
         return f"{self.name} ({self.poll.title})"

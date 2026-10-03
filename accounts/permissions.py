@@ -1,41 +1,31 @@
 """
-Custom permissions for VoteFlow.
-
-IsCreator       — user.role is 'creator' or 'admin'
-IsCreatorOrAdmin — alias (same logic, explicit name)
-IsPollOwner     — object-level: poll.creator == request.user
+Custom permissions and authorization helpers for VoteFlow (Django Ninja).
 """
 
-from rest_framework.permissions import BasePermission
+
+# ---------------------------------------------------------------------------
+# Role-based Authorization Helpers
+# ---------------------------------------------------------------------------
 
 
-class IsCreator(BasePermission):
-    """Allow access only to users with role 'creator' or 'admin'."""
-
-    def has_permission(self, request, view):
-        return (
-            request.user.is_authenticated
-            and request.user.role in ("creator", "admin")
-        )
+def is_organizer_or_admin(user) -> bool:
+    """Check if the user has 'ORGANIZER' (creator) or 'ADMIN' privileges."""
+    if not user or not user.is_authenticated:
+        return False
+    # Matching your User.Role TextChoices: ORGANIZER / ADMIN
+    return user.role in ("ORGANIZER", "ADMIN") or user.is_superuser
 
 
-class IsCreatorOrAdmin(BasePermission):
-    """Same as IsCreator — explicit naming for clarity in ViewSets."""
-
-    def has_permission(self, request, view):
-        return (
-            request.user.is_authenticated
-            and request.user.role in ("creator", "admin")
-        )
+is_creator = is_organizer_or_admin
 
 
-class IsPollOwner(BasePermission):
+def is_poll_owner(user, poll) -> bool:
     """
-    Object-level permission: only the poll's creator can modify it.
+    Object-level check: only the poll's creator can modify it.
     Admins bypass this check.
     """
-
-    def has_object_permission(self, request, view, obj):
-        if request.user.role == "admin":
-            return True
-        return obj.creator == request.user
+    if not user or not user.is_authenticated:
+        return False
+    if user.role == "ADMIN" or user.is_superuser:
+        return True
+    return poll.creator_id == user.id

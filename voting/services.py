@@ -6,6 +6,7 @@ Business logic lives here; views call these functions.
 """
 
 from datetime import timedelta
+
 from django.utils import timezone
 
 from .models import Vote
