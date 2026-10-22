@@ -40,6 +40,7 @@ class UserManager(BaseUserManager["User"]):
     def create_superuser(self, email, name, password=None, **extra_fields):
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
+        extra_fields.setdefault("role", User.Role.ADMIN)
         return self.create_user(email, name, password, **extra_fields)
 
 
@@ -101,7 +102,7 @@ class UserOTP(models.Model):
     def is_valid(self):
         """Checks if the OTP is less than 10 minutes old."""
 
-        return timezone.now() < self.created_at + timedelta(minutes=10)
+        return timezone.now() < self.updated_at + timedelta(minutes=10)
 
 
 class OrganizerProfile(models.Model):

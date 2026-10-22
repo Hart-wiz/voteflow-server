@@ -19,6 +19,7 @@ class UserSchema(ModelSchema):
     avatarUrl: str | None = None
     createdAt: datetime
     isCreator: bool = False
+    role: str = "user"
 
     class Meta:
         model = User
@@ -34,7 +35,15 @@ class UserSchema(ModelSchema):
 
     @staticmethod
     def resolve_isCreator(obj: User) -> bool:
-        return obj.is_creator
+        return obj.role in (User.Role.ORGANIZER, User.Role.ADMIN)
+
+    @staticmethod
+    def resolve_role(obj: User) -> str:
+        return {
+            User.Role.USER: "user",
+            User.Role.ORGANIZER: "creator",
+            User.Role.ADMIN: "admin",
+        }.get(obj.role, "user")
 
 
 class TokenPairSchema(Schema):
@@ -61,6 +70,7 @@ class RegisterSchema(Schema):
     name: str
     email: EmailStr
     password: str
+    organization: str | None = None
 
 
 class LoginSchema(Schema):

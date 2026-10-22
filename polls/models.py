@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     # Tell type checkers about reverse manager relations
     from django.db.models.manager import RelatedManager
 
-    from .models import Contestant
+    from .models import Contestant, ContestantMedia
 
 
 class Poll(models.Model):
@@ -164,6 +164,14 @@ class Contest(models.Model):
         related_name="contests",
         help_text="The user who created and manages this contest.",
     )
+    source_poll = models.OneToOneField(
+        Poll,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="contest_record",
+        help_text="Legacy poll used to preserve contestant and vote records during migration.",
+    )
 
     # Content
     title = models.CharField(max_length=255)
@@ -274,6 +282,9 @@ class Contestant(models.Model):
         related_name="contestants",
     )
 
+    if TYPE_CHECKING:
+        media: RelatedManager[ContestantMedia]
+
     name = models.CharField(max_length=255)
     author = models.CharField(max_length=255, blank=True, default="")
     description = models.TextField(blank=True, default="")
@@ -292,3 +303,163 @@ class Contestant(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.poll.title})"
+
+
+class ContestantMedia(models.Model):
+    """
+    Media files (images and videos) associated with a contestant.
+
+    Allows organizers to enrich contestant profiles with multiple media items.
+    Files are stored externally (e.g., Cloudinary) with URLs stored in the database.
+
+    Requirements:
+    - Supports IMAGE and VIDEO media types
+    - Maximum 10 media items per contestant
+    - Files up to 10MB
+    - Ordered display via display_order field
+    """
+
+    class MediaType(models.TextChoices):
+        IMAGE = "IMAGE", "Image"
+        VIDEO = "VIDEO", "Video"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    contestant = models.ForeignKey(
+        Contestant,
+        on_delete=models.CASCADE,
+        related_name="media",
+        help_text="The contestant this media belongs to.",
+    )
+
+    media_type = models.CharField(
+        max_length=10,
+        choices=MediaType.choices,
+        help_text="Type of media file (IMAGE or VIDEO).",
+    )
+
+    file_url = models.URLField(
+        max_length=2048,
+        help_text="URL of the media file (e.g., Cloudinary URL).",
+    )
+
+    caption = models.TextField(
+        max_length=500,
+        blank=True,
+        default="",
+        help_text="Optional caption describing the media.",
+    )
+
+    display_order = models.IntegerField(
+        default=0,
+        help_text="Order in which media should be displayed (ascending).",
+    )
+
+    file_size_bytes = models.PositiveIntegerField(
+        help_text="Size of the file in bytes. Maximum 10MB (10485760 bytes).",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "polls_contestantmedia"
+        ordering = ["display_order"]
+        indexes: ClassVar[list] = [
+            models.Index(fields=["contestant", "display_order"]),
+        ]
+        constraints: ClassVar[list] = [
+            models.CheckConstraint(
+                condition=models.Q(file_size_bytes__lte=10485760),
+                name="max_file_size_10mb",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.media_type} for {self.contestant.name}"
+
+
+class Livestream(models.Model):
+    """
+    Optional livestream associated with a contest.
+
+    Allows organizers to add real-time video streaming to their contests,
+    enabling viewers to watch live events while participating in voting.
+
+    Requirements:
+    - One livestream per contest (OneToOne relationship)
+    - Three status states: SCHEDULED, LIVE, ENDED
+    - Tracks viewer count during active streams
+    - Records timing information (scheduled, actual start, end times)
+    """
+
+    class Status(models.TextChoices):
+        SCHEDULED = "SCHEDULED", "Scheduled"
+        LIVE = "LIVE", "Live"
+        ENDED = "ENDED", "Ended"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    contest = models.OneToOneField(
+        Contest,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="livestream",
+        help_text="The contest this livestream is associated with.",
+    )
+
+    stream_url = models.URLField(
+        max_length=2048,
+        help_text="URL of the livestream (e.g., YouTube, Twitch, custom RTMP endpoint).",
+    )
+
+    stream_key = models.CharField(
+        max_length=255,
+        help_text="Private streaming key for the provider.",
+    )
+
+    provider = models.CharField(
+        max_length=100,
+        help_text="Livestream provider (e.g., 'youtube', 'twitch', 'custom').",
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.SCHEDULED,
+        help_text="Current status of the livestream.",
+    )
+
+    scheduled_start_time = models.DateTimeField(
+        help_text="When the livestream is scheduled to start (timezone-aware).",
+    )
+
+    actual_start_time = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the livestream actually started (set when status → LIVE).",
+    )
+
+    ended_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the livestream ended (set when status → ENDED).",
+    )
+
+    viewer_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Current number of viewers watching the livestream.",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "polls_livestream"
+        indexes: ClassVar[list] = [
+            models.Index(fields=["contest", "status"]),
+        ]
+
+    def __str__(self):
+        contest_title = self.contest.title if self.contest else "No Contest"
+        return f"Livestream for {contest_title} ({self.status})"

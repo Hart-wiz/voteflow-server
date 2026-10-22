@@ -5,6 +5,7 @@ Django admin configuration for the custom User model.
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth import get_user_model
+from .models import OrganizerProfile
 
 User = get_user_model()
 
@@ -29,3 +30,11 @@ class UserAdmin(BaseUserAdmin):
             "fields": ("email", "name", "password1", "password2", "role"),
         }),
     )
+
+
+@admin.register(OrganizerProfile)
+class OrganizerProfileAdmin(admin.ModelAdmin):
+    list_display = ("business_name", "user", "is_approved", "requested_at", "approved_at")
+    list_filter = ("is_approved", "is_verified")
+    search_fields = ("business_name", "user__email", "user__name")
+    readonly_fields = ("requested_at", "approved_at")

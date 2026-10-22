@@ -4,11 +4,13 @@ from typing import List
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import F
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from ninja import Router
 from ninja.pagination import paginate
 from ninja_jwt.authentication import JWTAuth
+from ninja.errors import HttpError
 
 from polls.models import Contestant, Poll
 from voting.services import create_vote
@@ -26,10 +28,12 @@ from .services import (
     initialize_payment,
     verify_paystack_webhook_signature,
     process_withdrawal_transfer,
+    process_vote_payment_webhook,
 )
 
 logger = logging.getLogger(__name__)
 router = Router(tags=["Payments"])
+webhooks_router = Router(tags=["Webhooks"])
 
 @router.get("/", response=WalletSchema, auth=JWTAuth())
 def get_wallet(request):
@@ -44,12 +48,12 @@ def get_wallet(request):
         "transactions": list(recent_transactions)
     }
 
-@router.get("/transactions", response=List[TransactionSchema], auth=JWTAuth())
+@router.get("/transactions/", response=List[TransactionSchema], auth=JWTAuth())
 @paginate
 def list_transactions(request):
     return Transaction.objects.filter(user=request.user).order_by("-created_at")
 
-@router.post("/withdraw", auth=JWTAuth())
+@router.post("/withdraw/", auth=JWTAuth())
 def withdraw(request, payload: WithdrawSchema):
     amount = payload.amount
 
@@ -115,7 +119,7 @@ def withdraw(request, payload: WithdrawSchema):
         "message": "Withdrawal queued",
     }
 
-@router.post("/pay", response=PayForVoteResponseSchema)
+@router.post("/pay/", response=PayForVoteResponseSchema)
 def pay_for_vote(request, payload: PayForVoteSchema):
     try:
         result = initialize_payment(
@@ -129,7 +133,7 @@ def pay_for_vote(request, payload: PayForVoteSchema):
         logger.error(f"Payment initialization failed: {e}")
         return 502, {"error": "Payment initialization failed."}
 
-@router.post("/webhook/paystack")
+@router.post("/webhook/paystack/", response={200: dict, 400: dict, 403: dict})
 def paystack_webhook(request):
     """
     Handles Paystack webhook callbacks.
@@ -185,10 +189,19 @@ def paystack_webhook(request):
     if payment.processed:
         return 200, {"status": "ok"}
 
+    if payment.amount is None or Decimal(str(data.get("amount", 0))) / Decimal(100) != payment.amount:
+        logger.warning("Ignoring Paystack webhook with amount mismatch for %s", reference)
+        return 200, {"status": "ok"}
+
     metadata = data.get("metadata", {})
     poll_id = metadata.get("poll_id")
     contestant_id = metadata.get("contestant_id")
-    quantity = metadata.get("quantity", 1)
+    try:
+        quantity = int(metadata.get("quantity", 1))
+    except (TypeError, ValueError):
+        return 200, {"status": "ok"}
+    if quantity < 1 or quantity > 1000:
+        return 200, {"status": "ok"}
 
     if not poll_id or not contestant_id:
         return 200, {"status": "ok"}
@@ -200,7 +213,7 @@ def paystack_webhook(request):
         return 200, {"status": "ok"}
 
     with transaction.atomic():
-        payment.status = "success"
+        payment.status = Payment.Status.CONFIRMED
         payment.processed = True
         payment.save()
 
@@ -236,3 +249,23 @@ def paystack_webhook(request):
         )
 
     return 200, {"status": "ok"}
+
+
+@webhooks_router.post("/paystack/", response={202: dict, 400: dict, 403: dict})
+def vote_paystack_webhook(request):
+    """Confirm Kiro vote-attempt payments from a signed Paystack callback."""
+    if not verify_paystack_webhook_signature(request):
+        return 403, {"detail": "Invalid signature"}
+    try:
+        payload = json.loads(request.body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return 400, {"detail": "Invalid JSON"}
+    data = payload.get("data") or {}
+    try:
+        outcome = process_vote_payment_webhook(payload.get("event", ""), data)
+    except Exception:
+        logger.exception("Could not process Paystack vote webhook")
+        raise HttpError(503, "Payment webhook processing is temporarily unavailable.")
+    if outcome == "invalid":
+        return 202, {"accepted": True, "processed": False}
+    return 202, {"accepted": True, "processed": outcome == "confirmed", "status": outcome}

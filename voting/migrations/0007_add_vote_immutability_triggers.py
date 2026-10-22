@@ -3,6 +3,43 @@
 from django.db import migrations
 
 
+def install_vote_triggers(apps, schema_editor):
+    """Install equivalent immutable-vote triggers on PostgreSQL and SQLite."""
+    vendor = schema_editor.connection.vendor
+    if vendor == "postgresql":
+        statements = [
+            """
+            CREATE OR REPLACE FUNCTION prevent_vote_modification()
+            RETURNS TRIGGER AS $$
+            BEGIN
+                RAISE EXCEPTION 'Votes cannot be modified or deleted';
+            END;
+            $$ LANGUAGE plpgsql
+            """,
+            "CREATE TRIGGER prevent_vote_update BEFORE UPDATE ON voting_vote FOR EACH ROW EXECUTE FUNCTION prevent_vote_modification()",
+            "CREATE TRIGGER prevent_vote_delete BEFORE DELETE ON voting_vote FOR EACH ROW EXECUTE FUNCTION prevent_vote_modification()",
+        ]
+    elif vendor == "sqlite":
+        statements = [
+            "CREATE TRIGGER prevent_vote_update BEFORE UPDATE ON voting_vote BEGIN SELECT RAISE(ABORT, 'Votes cannot be modified or deleted'); END",
+            "CREATE TRIGGER prevent_vote_delete BEFORE DELETE ON voting_vote BEGIN SELECT RAISE(ABORT, 'Votes cannot be modified or deleted'); END",
+        ]
+    else:
+        return
+    with schema_editor.connection.cursor() as cursor:
+        for statement in statements:
+            cursor.execute(statement)
+
+
+def remove_vote_triggers(apps, schema_editor):
+    vendor = schema_editor.connection.vendor
+    with schema_editor.connection.cursor() as cursor:
+        cursor.execute("DROP TRIGGER IF EXISTS prevent_vote_update ON voting_vote" if vendor == "postgresql" else "DROP TRIGGER IF EXISTS prevent_vote_update")
+        cursor.execute("DROP TRIGGER IF EXISTS prevent_vote_delete ON voting_vote" if vendor == "postgresql" else "DROP TRIGGER IF EXISTS prevent_vote_delete")
+        if vendor == "postgresql":
+            cursor.execute("DROP FUNCTION IF EXISTS prevent_vote_modification()")
+
+
 class Migration(migrations.Migration):
     """
     Add database-level immutability constraints for Vote records.
@@ -19,36 +56,5 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunSQL(
-            sql="""
-            -- Create function that prevents vote modification
-            CREATE OR REPLACE FUNCTION prevent_vote_modification()
-            RETURNS TRIGGER AS $$
-            BEGIN
-                RAISE EXCEPTION 'Votes cannot be modified or deleted';
-                RETURN NULL;
-            END;
-            $$ LANGUAGE plpgsql;
-            
-            -- Create trigger to prevent UPDATE operations
-            CREATE TRIGGER prevent_vote_update
-                BEFORE UPDATE ON voting_vote
-                FOR EACH ROW
-                EXECUTE FUNCTION prevent_vote_modification();
-            
-            -- Create trigger to prevent DELETE operations
-            CREATE TRIGGER prevent_vote_delete
-                BEFORE DELETE ON voting_vote
-                FOR EACH ROW
-                EXECUTE FUNCTION prevent_vote_modification();
-            """,
-            reverse_sql="""
-            -- Drop triggers
-            DROP TRIGGER IF EXISTS prevent_vote_update ON voting_vote;
-            DROP TRIGGER IF EXISTS prevent_vote_delete ON voting_vote;
-            
-            -- Drop function
-            DROP FUNCTION IF EXISTS prevent_vote_modification();
-            """
-        ),
+        migrations.RunPython(install_vote_triggers, remove_vote_triggers),
     ]

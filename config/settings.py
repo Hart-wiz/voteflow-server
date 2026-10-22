@@ -5,7 +5,7 @@ Environment variables are loaded from .env via python-decouple.
 Authentication powered by django-ninja-jwt.
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
 
 from decouple import config
@@ -69,6 +69,9 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "config.middleware.RateLimitMiddleware",
+    "config.middleware.ErrorHandlingMiddleware",
+    "config.middleware.LegacyPollDeprecationMiddleware",
 ]
 
 # ---------------------------------------------------------------------------
@@ -99,16 +102,26 @@ WSGI_APPLICATION = "config.wsgi.application"
 # ---------------------------------------------------------------------------
 # Database (PostgreSQL via psycopg v3)
 # ---------------------------------------------------------------------------
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",  # Automatically resolves to psycopg3
-        "NAME": config("DB_NAME", default="voteflow"),
-        "USER": config("DB_USER", default="postgres"),
-        "PASSWORD": config("DB_PASSWORD", default=""),
-        "HOST": config("DB_HOST", default="localhost"),
-        "PORT": config("DB_PORT", default="5432"),
+DB_ENGINE = config("DB_ENGINE", default="django.db.backends.postgresql")
+if DB_ENGINE == "django.db.backends.sqlite3":
+    DATABASES = {
+        "default": {
+            "ENGINE": DB_ENGINE,
+            "NAME": config("DB_NAME", default=str(BASE_DIR / "db.sqlite3")),
+            "OPTIONS": {"timeout": 20},
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": DB_ENGINE,
+            "NAME": config("DB_NAME", default="voteflow"),
+            "USER": config("DB_USER", default="postgres"),
+            "PASSWORD": config("DB_PASSWORD", default=""),
+            "HOST": config("DB_HOST", default="localhost"),
+            "PORT": config("DB_PORT", default="5432"),
+        }
+    }
 
 # ---------------------------------------------------------------------------
 # Password Validation
@@ -170,7 +183,11 @@ CLOUDINARY_STORAGE = {
 
 STORAGES = {
     "default": {
-        "BACKEND": "cloudinary_storage.storage.MediaCloudinaryStorage",
+        "BACKEND": (
+            "cloudinary_storage.storage.MediaCloudinaryStorage"
+            if CLOUDINARY_STORAGE["CLOUD_NAME"]
+            else "django.core.files.storage.FileSystemStorage"
+        ),
     },
     "staticfiles": {
         "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
@@ -181,6 +198,46 @@ STORAGES = {
 # Paystack
 # ---------------------------------------------------------------------------
 PAYSTACK_SECRET_KEY = config("PAYSTACK_SECRET_KEY", default="")
+
+# Redis backs cross-worker rate limits and the periodic task queue when set.
+REDIS_URL = config("REDIS_URL", default="")
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "voteflow-local",
+        }
+    }
+
+CELERY_BROKER_URL = config(
+    "CELERY_BROKER_URL", default=REDIS_URL or "redis://localhost:6379/0"
+)
+CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default=CELERY_BROKER_URL)
+CELERY_TIMEZONE = "UTC"
+CELERY_BEAT_SCHEDULE = {
+    "expire-vote-attempts-every-five-minutes": {
+        "task": "voting.tasks.check_vote_attempt_expiration",
+        "schedule": 300.0,
+    },
+    "close-ended-contests-every-minute": {
+        "task": "polls.tasks.close_ended_contests",
+        "schedule": 60.0,
+    },
+    "detect-suspicious-voting-every-two-minutes": {
+        "task": "voting.tasks.detect_suspicious_patterns",
+        "schedule": 120.0,
+    },
+}
+API_SUNSET_AT = datetime.fromisoformat(
+    config("API_SUNSET_AT", default=(datetime.now(dt_timezone.utc) + timedelta(days=30)).date().isoformat() + "T00:00:00+00:00")
+)
 
 # ---------------------------------------------------------------------------
 # Platform Fee (percentage taken from paid votes)
@@ -195,14 +252,13 @@ PLATFORM_FEE_PERCENT = 20
 
 
 # ---------------------------------------------------------------------------
-# Email Configuration (SMTP / Gmail App Password)
+# Transactional Email (Resend)
 # ---------------------------------------------------------------------------
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST = config("EMAIL_HOST", default="smtp.gmail.com")
-EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
-EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=True, cast=bool)
-EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
-EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
+RESEND_API_KEY = config("RESEND_API_KEY", default="")
 DEFAULT_FROM_EMAIL = config(
-    "DEFAULT_FROM_EMAIL", default="VoteFlow Team <no-reply@voteflow.com>"
+    "DEFAULT_FROM_EMAIL", default="VoteFlow <onboarding@resend.dev>"
 )
+
+# Optional identity gateway for phone, NIN, voter's card, and biometric checks.
+IDENTITY_PROVIDER_URL = config("IDENTITY_PROVIDER_URL", default="")
+IDENTITY_PROVIDER_API_KEY = config("IDENTITY_PROVIDER_API_KEY", default="")

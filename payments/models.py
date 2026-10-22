@@ -20,14 +20,20 @@ from django.db import models
 
 class Payment(models.Model):
     """
-    Record of a Paystack payment initialization.
-    Used to track payment flow from init → webhook confirmation.
+    Enhanced payment record with vote attempt linking.
+
+    Tracks payment flow from init → webhook confirmation with support for
+    vote attempt linking, provider reference tracking, and organizer earnings
+    calculation.
+
+    Requirements: 7.1, 7.3, 7.5, 7.9, 7.10, 7.12, 7.13
     """
 
     class Status(models.TextChoices):
-        PENDING = "pending", "Pending"
-        SUCCESS = "success", "Success"
-        FAILED = "failed", "Failed"
+        PENDING = "PENDING", "Pending"
+        CONFIRMED = "CONFIRMED", "Confirmed"
+        FAILED = "FAILED", "Failed"
+        REFUNDED = "REFUNDED", "Refunded"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
@@ -38,20 +44,99 @@ class Payment(models.Model):
         blank=True,
     )
 
-    email = models.EmailField()
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
-    reference = models.CharField(max_length=255, unique=True, db_index=True)
-    processed = models.BooleanField(default=False)
-
-    status = models.CharField(
-        max_length=20, choices=Status.choices, default=Status.PENDING
+    # NEW: Link to VoteAttempt with CASCADE delete
+    vote_attempt = models.ForeignKey(
+        "voting.VoteAttempt",
+        on_delete=models.CASCADE,
+        related_name="payments",
+        null=True,
+        blank=True,
+        help_text="The vote attempt this payment is associated with",
     )
 
-    metadata = models.JSONField(null=True, blank=True)
+    # NEW: Provider reference with unique constraint
+    provider_reference = models.CharField(
+        max_length=255,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text="Unique reference from payment provider (e.g., Paystack)",
+    )
+
+    # LEGACY: Keep old reference field for backward compatibility
+    reference = models.CharField(
+        max_length=255,
+        unique=True,
+        blank=True,
+        null=True,
+        help_text="[LEGACY] Use provider_reference instead",
+    )
+
+    # Enhanced status with new values
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+
+    # NEW: Total amount and organizer earnings
+    total_amount = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Total payment amount (vote_quantity × price_per_vote)",
+    )
+
+    organizer_earnings = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Amount credited to organizer after revenue share calculation",
+    )
+
+    # NEW: Currency field (ISO 4217)
+    currency = models.CharField(
+        max_length=3,
+        default="NGN",
+        help_text="ISO 4217 currency code (e.g., NGN, USD, EUR)",
+    )
+
+    # LEGACY: Keep old fields for backward compatibility
+    email = models.EmailField(blank=True, default="")
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="[LEGACY] Use total_amount instead",
+    )
+    processed = models.BooleanField(default=False)
+
+    # Enhanced metadata and timestamps
+    metadata = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Provider-specific response data and additional context",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # NEW: Confirmation timestamp
+    confirmed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when payment was confirmed",
+    )
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "status"]),
+        ]
+
     def __str__(self):
-        return f"Payment {self.reference} ({self.status})"
+        return f"Payment {self.provider_reference} ({self.status})"
 
 
 class Wallet(models.Model):

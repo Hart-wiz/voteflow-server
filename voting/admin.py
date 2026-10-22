@@ -5,6 +5,7 @@ Admin configuration for the voting app.
 from django.contrib import admin
 
 from .models import (
+    AuditLog,
     Vote,
     VoteAttempt,
     VoteAuditLog,
@@ -188,3 +189,76 @@ class VoteAttemptAdmin(admin.ModelAdmin):
             {"fields": ("id",), "classes": ("collapse",)},
         ),
     )
+
+
+@admin.register(AuditLog)
+class AuditLogAdmin(admin.ModelAdmin):
+    """Admin configuration for AuditLog model."""
+
+    list_display = (
+        "action_type",
+        "user",
+        "resource_type",
+        "resource_id",
+        "timestamp",
+        "ip_hash",
+    )
+    list_filter = ("action_type", "resource_type", "timestamp")
+    search_fields = (
+        "user__email",
+        "resource_type",
+        "resource_id",
+        "ip_hash",
+        "device_fingerprint",
+    )
+    readonly_fields = ("id", "timestamp")
+    date_hierarchy = "timestamp"
+
+    fieldsets = (
+        (
+            "Action Details",
+            {
+                "fields": (
+                    "action_type",
+                    "user",
+                    "resource_type",
+                    "resource_id",
+                )
+            },
+        ),
+        (
+            "Security Tracking",
+            {
+                "fields": (
+                    "ip_hash",
+                    "device_fingerprint",
+                )
+            },
+        ),
+        (
+            "Additional Context",
+            {
+                "fields": ("metadata",),
+                "classes": ("collapse",),
+            },
+        ),
+        (
+            "Metadata",
+            {
+                "fields": ("id", "timestamp"),
+                "classes": ("collapse",),
+            },
+        ),
+    )
+
+    def has_add_permission(self, request):
+        """Prevent manual creation of audit logs through admin."""
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        """Prevent editing of audit logs through admin."""
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        """Prevent deletion of audit logs through admin (read-only)."""
+        return False

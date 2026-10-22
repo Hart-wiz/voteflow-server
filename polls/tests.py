@@ -5,7 +5,7 @@ from django.db import IntegrityError, connection
 from django.test import TestCase
 from django.urls import reverse
 
-from .models import Contest, Contestant, Poll
+from .models import Contest, Contestant, ContestantMedia, Poll
 
 User = get_user_model()
 
@@ -483,8 +483,8 @@ class ContestModelTest(TestCase):
             # PostgreSQL-specific query to check for indexes
             cursor.execute(
                 """
-                SELECT indexname 
-                FROM pg_indexes 
+                SELECT indexname
+                FROM pg_indexes
                 WHERE tablename = %s
                 """,
                 [table_name],
@@ -502,4 +502,377 @@ class ContestModelTest(TestCase):
             )
             self.assertTrue(
                 any("state" in idx for idx in index_names), "No index on state field"
+            )
+
+
+
+class ContestantMediaModelTest(TestCase):
+    """
+    Test suite for ContestantMedia model.
+
+    Requirements validated:
+    - 8.1: FK to Contestant with CASCADE delete
+    - 8.2: media_type enum (IMAGE, VIDEO)
+    - 8.3: file_url field (max 2048 chars)
+    - 8.4: caption field (max 500 chars)
+    - 8.5: Maximum 10 media items per contestant
+    - 8.6: display_order field
+    - 8.7: Media type validation for IMAGE
+    - 8.8: Media type validation for VIDEO
+    - 8.9: file_size_bytes field
+    - 8.10: File size validation (max 10MB)
+    - 8.11: CASCADE delete behavior
+    - 8.12: Ordering by display_order
+    """
+
+    def setUp(self):
+        """Create test user, poll, and contestant for use in test cases."""
+        self.user = User.objects.create_user(
+            email="organizer@example.com",
+            name="Test Organizer",
+            password="testpass123",
+        )
+        self.poll = Poll.objects.create(
+            title="Test Poll",
+            creator=self.user,
+        )
+        self.contestant = Contestant.objects.create(
+            name="Test Contestant",
+            poll=self.poll,
+        )
+
+    def test_create_contestant_media_with_image_type(self):
+        """
+        Test creating ContestantMedia with IMAGE media type.
+        **Validates: Requirements 8.2**
+        """
+        media = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/image.jpg",
+            caption="Test image",
+            display_order=0,
+            file_size_bytes=1024000,  # 1MB
+        )
+
+        self.assertEqual(media.media_type, ContestantMedia.MediaType.IMAGE)
+        self.assertIsNotNone(media.id)
+
+    def test_create_contestant_media_with_video_type(self):
+        """
+        Test creating ContestantMedia with VIDEO media type.
+        **Validates: Requirements 8.2**
+        """
+        media = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.VIDEO,
+            file_url="https://example.com/video.mp4",
+            caption="Test video",
+            display_order=0,
+            file_size_bytes=5000000,  # 5MB
+        )
+
+        self.assertEqual(media.media_type, ContestantMedia.MediaType.VIDEO)
+        self.assertIsNotNone(media.id)
+
+    def test_file_url_accepts_up_to_2048_chars(self):
+        """
+        Test that file_url field can store up to 2048 characters.
+        **Validates: Requirements 8.3**
+        """
+        long_url = "https://example.com/" + "x" * 2000
+
+        media = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url=long_url,
+            file_size_bytes=1000000,
+        )
+
+        self.assertEqual(len(media.file_url), len(long_url))
+        self.assertLessEqual(len(media.file_url), 2048)
+
+    def test_caption_field_accepts_up_to_500_chars(self):
+        """
+        Test that caption field can store up to 500 characters.
+        **Validates: Requirements 8.4**
+        """
+        long_caption = "x" * 500
+
+        media = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/image.jpg",
+            caption=long_caption,
+            file_size_bytes=1000000,
+        )
+
+        self.assertEqual(len(media.caption), 500)
+
+    def test_caption_field_defaults_to_empty_string(self):
+        """
+        Test that caption field defaults to empty string when not provided.
+        **Validates: Requirements 8.4**
+        """
+        media = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/image.jpg",
+            file_size_bytes=1000000,
+        )
+
+        self.assertEqual(media.caption, "")
+
+    def test_display_order_field(self):
+        """
+        Test that display_order field works correctly.
+        **Validates: Requirements 8.6**
+        """
+        media1 = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/image1.jpg",
+            display_order=0,
+            file_size_bytes=1000000,
+        )
+
+        media2 = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/image2.jpg",
+            display_order=1,
+            file_size_bytes=1000000,
+        )
+
+        self.assertEqual(media1.display_order, 0)
+        self.assertEqual(media2.display_order, 1)
+
+    def test_display_order_defaults_to_zero(self):
+        """
+        Test that display_order defaults to 0 when not provided.
+        **Validates: Requirements 8.6**
+        """
+        media = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/image.jpg",
+            file_size_bytes=1000000,
+        )
+
+        self.assertEqual(media.display_order, 0)
+
+    def test_media_ordered_by_display_order(self):
+        """
+        Test that media items are ordered by display_order ascending.
+        **Validates: Requirements 8.12**
+        """
+        # Create media in reverse order
+        media3 = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/image3.jpg",
+            display_order=2,
+            file_size_bytes=1000000,
+        )
+
+        media1 = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/image1.jpg",
+            display_order=0,
+            file_size_bytes=1000000,
+        )
+
+        media2 = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/image2.jpg",
+            display_order=1,
+            file_size_bytes=1000000,
+        )
+
+        # Retrieve all media for contestant
+        media_items = list(self.contestant.media.all())
+
+        # Verify they're ordered by display_order
+        self.assertEqual(media_items[0].id, media1.id)
+        self.assertEqual(media_items[1].id, media2.id)
+        self.assertEqual(media_items[2].id, media3.id)
+
+    def test_file_size_bytes_field(self):
+        """
+        Test that file_size_bytes field stores the file size correctly.
+        **Validates: Requirements 8.9**
+        """
+        file_size = 5242880  # 5MB
+
+        media = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/image.jpg",
+            file_size_bytes=file_size,
+        )
+
+        self.assertEqual(media.file_size_bytes, file_size)
+
+    def test_check_constraint_enforces_max_file_size(self):
+        """
+        Test that CHECK constraint rejects file_size_bytes > 10MB (10485760 bytes).
+        **Validates: Requirements 8.10**
+        """
+        max_size = 10485760  # 10MB in bytes
+        over_max_size = max_size + 1
+
+        with self.assertRaises(IntegrityError) as context:
+            ContestantMedia.objects.create(
+                contestant=self.contestant,
+                media_type=ContestantMedia.MediaType.IMAGE,
+                file_url="https://example.com/large_image.jpg",
+                file_size_bytes=over_max_size,
+            )
+
+        # Verify the error is related to the check constraint
+        self.assertIn("max_file_size_10mb", str(context.exception))
+
+    def test_check_constraint_allows_max_file_size(self):
+        """
+        Test that CHECK constraint allows file_size_bytes exactly at 10MB.
+        **Validates: Requirements 8.10**
+        """
+        max_size = 10485760  # Exactly 10MB
+
+        media = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/max_size_image.jpg",
+            file_size_bytes=max_size,
+        )
+
+        self.assertEqual(media.file_size_bytes, max_size)
+        self.assertIsNotNone(media.id)
+
+    def test_cascade_delete_when_contestant_deleted(self):
+        """
+        Test that ContestantMedia is deleted when associated Contestant is deleted.
+        **Validates: Requirements 8.1, 8.11**
+        """
+        media = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/image.jpg",
+            file_size_bytes=1000000,
+        )
+
+        media_id = media.id
+
+        # Verify media exists
+        self.assertTrue(ContestantMedia.objects.filter(id=media_id).exists())
+
+        # Delete the contestant
+        self.contestant.delete()
+
+        # Verify media is also deleted (CASCADE)
+        self.assertFalse(ContestantMedia.objects.filter(id=media_id).exists())
+
+    def test_multiple_media_items_per_contestant(self):
+        """
+        Test that a contestant can have multiple media items.
+        **Validates: Requirements 8.1**
+        """
+        # Create multiple media items
+        for i in range(5):
+            ContestantMedia.objects.create(
+                contestant=self.contestant,
+                media_type=ContestantMedia.MediaType.IMAGE,
+                file_url=f"https://example.com/image{i}.jpg",
+                display_order=i,
+                file_size_bytes=1000000,
+            )
+
+        # Verify all media items exist
+        self.assertEqual(self.contestant.media.count(), 5)
+
+    def test_contestant_media_foreign_key_relationship(self):
+        """
+        Test that ContestantMedia correctly links to Contestant via foreign key.
+        **Validates: Requirements 8.1**
+        """
+        media = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/image.jpg",
+            file_size_bytes=1000000,
+        )
+
+        # Verify foreign key relationship
+        self.assertEqual(media.contestant, self.contestant)
+        self.assertEqual(media.contestant.id, self.contestant.id)
+
+        # Verify reverse relationship
+        self.assertIn(media, self.contestant.media.all())
+
+    def test_contestant_media_str_representation(self):
+        """
+        Test the string representation of ContestantMedia.
+        **Validates: Requirements 8.2**
+        """
+        media = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.VIDEO,
+            file_url="https://example.com/video.mp4",
+            file_size_bytes=5000000,
+        )
+
+        expected_str = f"VIDEO for {self.contestant.name}"
+        self.assertEqual(str(media), expected_str)
+
+    def test_contestant_media_db_table_name(self):
+        """
+        Test that ContestantMedia uses the correct database table name.
+        **Validates: Requirements 8.1**
+        """
+        self.assertEqual(ContestantMedia._meta.db_table, "polls_contestantmedia")
+
+    def test_contestant_media_timestamps(self):
+        """
+        Test that created_at timestamp is automatically populated.
+        **Validates: Requirements 8.1**
+        """
+        media = ContestantMedia.objects.create(
+            contestant=self.contestant,
+            media_type=ContestantMedia.MediaType.IMAGE,
+            file_url="https://example.com/image.jpg",
+            file_size_bytes=1000000,
+        )
+
+        self.assertIsNotNone(media.created_at)
+
+    def test_contestant_media_indexes_exist(self):
+        """
+        Test that database indexes are created for key fields.
+        **Validates: Requirements 8.1, 8.12**
+        """
+        table_name = ContestantMedia._meta.db_table
+
+        with connection.cursor() as cursor:
+            # PostgreSQL-specific query to check for indexes
+            cursor.execute(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE tablename = %s
+                """,
+                [table_name],
+            )
+            indexes = cursor.fetchall()
+            index_names = [idx[0] for idx in indexes]
+
+            # Check that indexes exist
+            self.assertGreater(len(indexes), 0, "No indexes found on ContestantMedia table")
+
+            # Verify index on (contestant, display_order)
+            index_str = " ".join(index_names)
+            self.assertTrue(
+                any("contestant" in idx for idx in index_names),
+                "No index on contestant field"
             )

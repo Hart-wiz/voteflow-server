@@ -8,6 +8,7 @@ dependencies = [
     "annotated-types==0.8.0",
     "asgiref==3.11.1",
     "certifi==2026.7.22",
+    "celery>=5.6,<6",
     "cffi==2.1.1",
     "charset-normalizer==3.5.1",
     "cloudinary==1.42.0",
@@ -20,6 +21,7 @@ dependencies = [
     "django-ninja==1.7.1",
     "django-ninja-extra==0.31.7",
     "django-ninja-jwt==5.4.5",
+    "email-validator>=2.2",
     "idna==3.20",
     "injector==0.24.0",
     "pillow>=12.3.0",
@@ -32,6 +34,7 @@ dependencies = [
     "python-decouple==3.8",
     "python-dotenv==1.2.3",
     "requests==2.34.2",
+    "redis>=5.2,<7",
     "six==1.17.0",
     "sqlparse==0.5.5",
     "typing-extensions==4.16.0",
@@ -43,6 +46,9 @@ dependencies = [
 [dependency-groups]
 dev = [
     "django-stubs>=6.1.1",
+    "hypothesis>=6.150",
+    "pytest>=8.4",
+    "pytest-django>=4.11",
 ]
 
 [tool.ruff]

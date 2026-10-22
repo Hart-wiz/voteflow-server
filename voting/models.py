@@ -515,6 +515,12 @@ class VoteAttempt(models.Model):
             models.Index(fields=["user", "contest"]),
             models.Index(fields=["ip_hash", "contest", "created_at"]),
         ]
+        constraints: ClassVar[list] = [
+            models.CheckConstraint(
+                condition=models.Q(vote_quantity__gte=1, vote_quantity__lte=1000),
+                name="vote_attempt_quantity_range",
+            ),
+        ]
 
     def __str__(self):
         return f"Vote attempt by {self.user.email} for {self.contestant.name} ({self.state})"
@@ -562,7 +568,7 @@ class VoteAttempt(models.Model):
 class Vote(models.Model):
     """
     Enhanced immutable vote record - source of truth for vote counts.
-    
+
     Key changes from original Vote model:
     - Links to VoterIdentity instead of User directly (enables per-contest verification)
     - Includes vote_number for sequential tracking within contests
@@ -570,7 +576,7 @@ class Vote(models.Model):
     - Uses ip_hash instead of raw IP for privacy
     - Links to Payment for paid contests
     - Maintains backward compatibility with legacy fields during transition
-    
+
     Once created, votes should not be modified or deleted (enforced via DB triggers).
     """
 
@@ -596,6 +602,8 @@ class Vote(models.Model):
         "VoterIdentity",
         on_delete=models.RESTRICT,
         related_name="votes",
+        null=True,
+        blank=True,
         help_text="The verified voter identity for this vote",
     )
 
@@ -611,6 +619,7 @@ class Vote(models.Model):
 
     # NEW: Sequential vote tracking
     vote_number = models.IntegerField(
+        validators=[MinValueValidator(1)],
         help_text="Sequential number within the contest"
     )
 
@@ -695,12 +704,18 @@ class Vote(models.Model):
         indexes = (
             # Legacy indexes
             models.Index(fields=["poll", "contestant"]),
-            models.Index(fields=["voter"]),
-            models.Index(fields=["payment_ref"]),
             # NEW indexes for enhanced tracking
-            models.Index(fields=["poll", "vote_number"], name="voting_vote_poll_vote_num_idx"),
-            models.Index(fields=["voter_identity"], name="voting_vote_voter_identity_idx"),
-            models.Index(fields=["payment"], name="voting_vote_payment_idx"),
+            models.Index(fields=["poll", "voter_identity"], name="voting_vote_poll_voter_idx"),
+            models.Index(fields=["created_at"], name="voting_vote_created_at_idx"),
+        )
+        constraints = (
+            models.UniqueConstraint(
+                fields=["poll", "vote_number"], name="unique_poll_vote_number"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(vote_quantity__gte=1, vote_quantity__lte=1000),
+                name="vote_quantity_range",
+            ),
         )
 
     def __str__(self):
@@ -736,3 +751,107 @@ class VoteAuditLog(models.Model):
 
     def __str__(self):
         return f"{self.action} on {self.poll} @ {self.ip_address}"
+
+
+class AuditLog(models.Model):
+    """
+    Comprehensive audit logging for security analysis.
+
+    Tracks all security-relevant actions including authentication, authorization,
+    voting attempts, contest management, and payment transactions. Provides
+    a complete audit trail for fraud detection and compliance.
+
+    Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.18
+    """
+
+    class ActionType(models.TextChoices):
+        VOTE_STARTED = "VOTE_STARTED", "Vote Started"
+        VOTE_COMPLETED = "VOTE_COMPLETED", "Vote Completed"
+        VOTE_REJECTED = "VOTE_REJECTED", "Vote Rejected"
+        VOTE_FAILED = "VOTE_FAILED", "Vote Failed"
+        LOGIN_SUCCESS = "LOGIN_SUCCESS", "Login Success"
+        LOGIN_FAILED = "LOGIN_FAILED", "Login Failed"
+        LOGOUT = "LOGOUT", "Logout"
+        ROLE_CHANGE = "ROLE_CHANGE", "Role Change"
+        CONTEST_CREATED = "CONTEST_CREATED", "Contest Created"
+        CONTEST_STATE_CHANGE = "CONTEST_STATE_CHANGE", "Contest State Change"
+        PAYMENT_CONFIRMED = "PAYMENT_CONFIRMED", "Payment Confirmed"
+        PAYMENT_FAILED = "PAYMENT_FAILED", "Payment Failed"
+        SUSPICIOUS_PATTERN = "SUSPICIOUS_PATTERN", "Suspicious Pattern"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # User reference (nullable - some actions may not have a user)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_index=False,
+        related_name="audit_logs",
+        help_text="The user who performed the action (null for system actions).",
+    )
+
+    # Action details
+    action_type = models.CharField(
+        max_length=30,
+        choices=ActionType.choices,
+        db_index=False,
+        help_text="Type of action being audited.",
+    )
+
+    # Resource tracking
+    resource_type = models.CharField(
+        max_length=100,
+        help_text="Type of resource affected (e.g., 'Contest', 'Vote', 'Payment').",
+    )
+
+    resource_id = models.CharField(
+        max_length=255,
+        help_text="Identifier of the affected resource.",
+    )
+
+    # Timestamp with millisecond precision
+    timestamp = models.DateTimeField(
+        auto_now_add=True,
+        db_index=False,
+        help_text="When the action occurred (with millisecond precision).",
+    )
+
+    # Security tracking
+    device_fingerprint = models.CharField(
+        max_length=512,
+        blank=True,
+        default="",
+        help_text="Device fingerprint for fraud detection (max 512 characters).",
+    )
+
+    ip_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="SHA-256 hash of the IP address for privacy and security.",
+    )
+
+    # Contextual data
+    metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Additional contextual information about the action (stored as JSON).",
+    )
+
+    class Meta:
+        db_table = "voting_auditlog"
+        verbose_name = "Audit Log"
+        verbose_name_plural = "Audit Logs"
+        indexes: ClassVar[list] = [
+            models.Index(fields=["timestamp"], name="auditlog_timestamp_idx"),
+            models.Index(fields=["user", "timestamp"], name="auditlog_user_timestamp_idx"),
+            models.Index(fields=["action_type", "timestamp"], name="auditlog_action_timestamp_idx"),
+            models.Index(fields=["resource_type", "resource_id"], name="auditlog_resource_idx"),
+        ]
+        ordering = ["-timestamp"]
+
+    def __str__(self):
+        user_str = self.user.email if self.user else "System"
+        return f"{self.action_type} by {user_str} at {self.timestamp}"

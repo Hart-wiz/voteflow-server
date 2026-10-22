@@ -8,6 +8,7 @@ import django.core.validators
 import django.db.models.deletion
 from django.conf import settings
 from django.db import migrations, models
+from django.utils.text import slugify
 
 
 def migrate_existing_votes(apps, schema_editor):
@@ -21,6 +22,50 @@ def migrate_existing_votes(apps, schema_editor):
     """
     Vote = apps.get_model('voting', 'Vote')
     VoterIdentity = apps.get_model('voting', 'VoterIdentity')
+    Poll = apps.get_model('polls', 'Poll')
+    Contest = apps.get_model('polls', 'Contest')
+
+    # Preserve the legacy UUIDs so the voter identities below can safely use
+    # contest_id=poll_id while both models coexist during the transition.
+    state_map = {
+        'active': 'LIVE',
+        'ending_soon': 'LIVE',
+        'closed': 'CLOSED',
+        'draft': 'DRAFT',
+        'new': 'DRAFT',
+    }
+    for poll in Poll.objects.order_by('created_at', 'id').iterator():
+        existing = Contest.objects.filter(pk=poll.pk).first()
+        if existing:
+            if existing.organizer_id != poll.creator_id or existing.title != poll.title:
+                raise RuntimeError(
+                    f'Cannot migrate poll {poll.pk}: a different contest already uses its UUID.'
+                )
+            continue
+
+        base_slug = (poll.slug or slugify(poll.title) or f'contest-{poll.pk}')[:280]
+        slug = base_slug
+        suffix = 1
+        while Contest.objects.filter(slug=slug).exists():
+            suffix_text = f'-{suffix}'
+            slug = f'{base_slug[:300 - len(suffix_text)]}{suffix_text}'
+            suffix += 1
+        Contest.objects.create(
+            id=poll.pk,
+            organizer_id=poll.creator_id,
+            title=poll.title,
+            slug=slug,
+            description=poll.description,
+            category=poll.category,
+            image=poll.image,
+            tags=poll.tags,
+            state=state_map.get(poll.status, 'DRAFT'),
+            timezone='UTC',
+            start_time=None,
+            end_time=poll.ends_at,
+            results_visibility='after_close',
+            version=0,
+        )
     
     # Process votes in batches to handle large datasets
     votes = Vote.objects.select_related('poll', 'voter').order_by('poll_id', 'created_at')
