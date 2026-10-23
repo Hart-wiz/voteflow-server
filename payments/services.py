@@ -10,6 +10,7 @@ Handles:
 
 import hashlib
 import hmac
+import html
 import logging
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
@@ -19,17 +20,19 @@ import requests
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 
 from config.errors import ExternalServiceError
 from voting.models import AuditLog
 
-from .models import Payment
+from .models import Payment, Transaction, Wallet
 from .retries import retry_on_failure
 
 logger = logging.getLogger(__name__)
 
 PAYSTACK_BASE_URL = "https://api.paystack.co"
+INLINE_POLL_VOTE_FLOW = "inline_poll_vote"
 
 
 def _get_headers():
@@ -181,6 +184,167 @@ def initialize_vote_payment(vote_attempt):
         raise ExternalServiceError("Could not initialize the payment.") from exc
 
 
+def create_inline_poll_payment(*, poll, contestant, quantity, email, user=None):
+    """Create the server-owned payment record used by Paystack InlineJS."""
+    if not settings.PAYSTACK_SECRET_KEY or not settings.PAYSTACK_PUBLIC_KEY:
+        raise ImproperlyConfigured(
+            "PAYSTACK_SECRET_KEY and PAYSTACK_PUBLIC_KEY must be configured for paid votes."
+        )
+
+    amount = (poll.price_per_vote * quantity).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    if amount > Decimal("999999.99"):
+        raise ValueError("The checkout amount exceeds the supported payment limit.")
+    reference = f"vf-{uuid.uuid4().hex}"
+    metadata = {
+        "flow": INLINE_POLL_VOTE_FLOW,
+        "poll_id": str(poll.pk),
+        "contestant_id": str(contestant.pk),
+        "quantity": quantity,
+    }
+    payment = Payment.objects.create(
+        user=user,
+        provider_reference=reference,
+        reference=reference,
+        status=Payment.Status.PENDING,
+        total_amount=amount,
+        amount=amount,
+        currency="NGN",
+        email=email,
+        metadata=metadata,
+    )
+    return {
+        "payment_id": str(payment.pk),
+        "reference": reference,
+        "amount": str(amount),
+        "amount_minor": int(amount * 100),
+        "currency": payment.currency,
+        "public_key": settings.PAYSTACK_PUBLIC_KEY,
+    }
+
+
+@transaction.atomic
+def confirm_inline_poll_payment(transaction_data, request=None):
+    """Idempotently validate a successful Paystack charge and record its vote."""
+    from notifications.email import send_transactional_email
+    from notifications.models import Notification
+    from polls.models import Contestant, Poll, VoteAuditLog
+    from voting.services import create_vote
+
+    reference = str(transaction_data.get("reference", ""))
+    if not reference:
+        return "ignored"
+
+    payment = Payment.objects.select_for_update().filter(
+        provider_reference=reference,
+        metadata__flow=INLINE_POLL_VOTE_FLOW,
+    ).first()
+    if not payment:
+        return "ignored"
+
+    metadata = payment.metadata or {}
+    if transaction_data.get("status") != "success":
+        return "pending"
+    try:
+        paid_amount = Decimal(str(transaction_data.get("amount", 0))) / Decimal(100)
+    except Exception:
+        return "invalid"
+
+    provider_email = str((transaction_data.get("customer") or {}).get("email") or "")
+    if (
+        paid_amount != payment.total_amount
+        or transaction_data.get("currency") != payment.currency
+        or provider_email.lower() != payment.email.lower()
+    ):
+        return "invalid"
+    if payment.status == Payment.Status.CONFIRMED and payment.processed:
+        return "duplicate"
+    if payment.status != Payment.Status.PENDING:
+        return "invalid"
+
+    try:
+        poll = Poll.objects.select_related("creator").get(pk=metadata["poll_id"])
+        contestant = Contestant.objects.get(pk=metadata["contestant_id"], poll=poll)
+        quantity = int(metadata["quantity"])
+    except (KeyError, TypeError, ValueError, Poll.DoesNotExist, Contestant.DoesNotExist):
+        return "invalid"
+
+    if quantity < 1 or quantity > 1000:
+        return "invalid"
+
+    ip = request.META.get("REMOTE_ADDR") if request else None
+    user_agent = request.META.get("HTTP_USER_AGENT", "") if request else ""
+    Contestant.objects.filter(pk=contestant.pk).update(votes=F("votes") + quantity)
+    create_vote(
+        poll=poll,
+        contestant=contestant,
+        voter=payment.user,
+        voter_email=payment.email,
+        quantity=quantity,
+        payment_ref=reference,
+        payment=payment,
+        ip=ip,
+        user_agent=user_agent,
+        is_paid=True,
+        amount=payment.total_amount,
+    )
+
+    _, creator_earnings = calculate_split(payment.total_amount)
+    creator_earnings = Decimal(str(creator_earnings)).quantize(Decimal("0.01"))
+    wallet, _ = Wallet.objects.select_for_update().get_or_create(user=poll.creator)
+    wallet.balance += creator_earnings
+    wallet.lifetime_earnings += creator_earnings
+    wallet.save(update_fields=["balance", "lifetime_earnings"])
+    Transaction.objects.create(
+        user=poll.creator,
+        description=f"Earnings from poll: {poll.title}",
+        amount=creator_earnings,
+        status=Transaction.Status.COMPLETED,
+        type=Transaction.Type.EARNING,
+        metadata={"poll_id": str(poll.pk), "payment_ref": reference},
+    )
+
+    payment.status = Payment.Status.CONFIRMED
+    payment.processed = True
+    payment.organizer_earnings = creator_earnings
+    payment.confirmed_at = timezone.now()
+    payment.metadata = {**metadata, "gateway_status": "success"}
+    payment.save(
+        update_fields=["status", "processed", "organizer_earnings", "confirmed_at", "metadata"]
+    )
+    notification = Notification.objects.create(
+        receiver=poll.creator,
+        title=f"New vote on {poll.title}"[:30],
+        description=f"{quantity} vote(s) cast for {contestant.name}.",
+        email=poll.creator.email,
+    )
+    VoteAuditLog.objects.create(
+        poll=poll,
+        ip_address=ip,
+        user_agent=user_agent,
+        action="vote_success",
+    )
+
+    def send_vote_email():
+        try:
+            send_transactional_email(
+                to=poll.creator.email,
+                subject=f"New vote on {poll.title}",
+                text=f"{quantity} vote(s) were cast for {contestant.name} in {poll.title}.",
+                html=(
+                    f"<p>{quantity} vote(s) were cast for "
+                    f"<strong>{html.escape(contestant.name)}</strong> in "
+                    f"{html.escape(poll.title)}.</p>"
+                ),
+            )
+        except Exception:
+            logger.exception("Could not email vote notification %s", notification.id)
+
+    transaction.on_commit(send_vote_email)
+    return "confirmed"
+
+
 @transaction.atomic
 def process_vote_payment_webhook(event, data):
     """Idempotently confirm a paid vote attempt and credit organizer earnings."""
@@ -189,9 +353,9 @@ def process_vote_payment_webhook(event, data):
     reference = str(data.get("reference", ""))
     if not reference:
         return "ignored"
-    payment = Payment.objects.select_for_update().select_related(
-        "vote_attempt__user", "vote_attempt__contest__organizer", "vote_attempt__contest"
-    ).filter(provider_reference=reference).first()
+    payment = Payment.objects.select_for_update().filter(provider_reference=reference).first()
+    if payment and (payment.metadata or {}).get("flow") == INLINE_POLL_VOTE_FLOW:
+        return confirm_inline_poll_payment(data)
     if not payment or not payment.vote_attempt_id:
         return "ignored"
     if payment.status == Payment.Status.CONFIRMED:

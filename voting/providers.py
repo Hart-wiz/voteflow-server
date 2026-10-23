@@ -17,7 +17,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from config.errors import ExternalServiceError, ResourceNotFoundError, RateLimitError
+from config.errors import ExternalServiceError, RateLimitError, ResourceNotFoundError
 from notifications.email import send_transactional_email
 
 from .models import VoterIdentity, VoterVerification, VotingPolicy
@@ -91,8 +91,12 @@ class EmailVerificationProvider(VerificationProvider):
                     html=f"<p>Your verification code is <strong>{code}</strong>.</p><p>It expires in 10 minutes.</p>",
                 )
             except Exception as exc:
-                verification.mark_completed(VoterVerification.Status.FAILED, {"reason": "delivery_failed"})
-                raise ExternalServiceError("Could not send the verification code.") from exc
+                verification.mark_completed(
+                    VoterVerification.Status.FAILED, {"reason": "delivery_failed"}
+                )
+                raise ExternalServiceError(
+                    "Could not send the verification code."
+                ) from exc
         identity.verification_status = VoterIdentity.VerificationStatus.PENDING
         identity.save(update_fields=["verification_status", "updated_at"])
         return verification
@@ -102,15 +106,19 @@ class EmailVerificationProvider(VerificationProvider):
         expires_at = response.get("expires_at")
         if verification.status == VoterVerification.Status.PENDING and expires_at:
             if timezone.now() >= datetime.fromisoformat(expires_at):
-                verification.mark_completed(VoterVerification.Status.FAILED, {"reason": "expired"})
+                verification.mark_completed(
+                    VoterVerification.Status.FAILED, {"reason": "expired"}
+                )
         return verification.status
 
     def complete_verification(self, verification, data):
         invalid_code = False
         with transaction.atomic():
-            verification = VoterVerification.objects.select_for_update().select_related(
-                "voter_identity__contest"
-            ).get(pk=verification.pk)
+            verification = (
+                VoterVerification.objects.select_for_update()
+                .select_related("voter_identity__contest")
+                .get(pk=verification.pk)
+            )
             self.check_status(verification)
             payload = verification.verification_response or {}
             supplied = str((data or {}).get("code", ""))
@@ -132,7 +140,9 @@ class EmailVerificationProvider(VerificationProvider):
                 )
                 _refresh_identity_status(verification.voter_identity)
         if invalid_code:
-            raise ValidationError({"code": "The verification code is invalid or expired."})
+            raise ValidationError(
+                {"code": "The verification code is invalid or expired."}
+            )
         return verification
 
 
@@ -154,8 +164,12 @@ class ConfiguredHTTPVerificationProvider(VerificationProvider):
         url = getattr(settings, "IDENTITY_PROVIDER_URL", "")
         api_key = getattr(settings, "IDENTITY_PROVIDER_API_KEY", "")
         if not url or not api_key:
-            raise ExternalServiceError("This identity verification provider is not configured.")
-        if not url.startswith("https://") and not (settings.DEBUG and url.startswith("http://localhost")):
+            raise ExternalServiceError(
+                "This identity verification provider is not configured."
+            )
+        if not url.startswith("https://") and not (
+            settings.DEBUG and url.startswith("http://localhost")
+        ):
             raise ExternalServiceError("The identity provider URL must use HTTPS.")
         values = data or {}
         if self.method == VotingPolicy.VerificationMethod.PHONE:
@@ -167,7 +181,9 @@ class ConfiguredHTTPVerificationProvider(VerificationProvider):
         else:
             secret = values.get("provider_token")
         if not secret:
-            raise ValidationError({"identity": "A provider-issued identity value is required."})
+            raise ValidationError(
+                {"identity": "A provider-issued identity value is required."}
+            )
         verification = VoterVerification.objects.create(
             voter_identity=identity,
             provider=self.provider_name,
@@ -178,22 +194,32 @@ class ConfiguredHTTPVerificationProvider(VerificationProvider):
         try:
             response = requests.post(
                 url,
-                json={"method": self.method, "value": secret, "reference": str(verification.pk)},
+                json={
+                    "method": self.method,
+                    "value": secret,
+                    "reference": str(verification.pk),
+                },
                 headers={"Authorization": f"Bearer {api_key}"},
                 timeout=20,
             )
             response.raise_for_status()
             result = response.json()
         except (requests.RequestException, ValueError) as exc:
-            verification.mark_completed(VoterVerification.Status.FAILED, {"reason": "provider_error"})
+            verification.mark_completed(
+                VoterVerification.Status.FAILED, {"reason": "provider_error"}
+            )
             raise ExternalServiceError("Identity provider request failed.") from exc
         verified = result.get("verified")
         reference = str(result.get("reference", ""))[:255]
         if verified is True:
-            verification.mark_completed(VoterVerification.Status.SUCCESS, {"reference": reference})
+            verification.mark_completed(
+                VoterVerification.Status.SUCCESS, {"reference": reference}
+            )
             _refresh_identity_status(identity)
         elif verified is False:
-            verification.mark_completed(VoterVerification.Status.FAILED, {"reference": reference})
+            verification.mark_completed(
+                VoterVerification.Status.FAILED, {"reference": reference}
+            )
         else:
             verification.verification_response = {"reference": reference}
             verification.save(update_fields=["verification_response"])
@@ -219,18 +245,26 @@ class ConfiguredHTTPVerificationProvider(VerificationProvider):
             response.raise_for_status()
             verified = response.json().get("verified")
         except (requests.RequestException, ValueError) as exc:
-            raise ExternalServiceError("Identity provider status request failed.") from exc
+            raise ExternalServiceError(
+                "Identity provider status request failed."
+            ) from exc
         if verified is True:
-            verification.mark_completed(VoterVerification.Status.SUCCESS, {"reference": reference})
+            verification.mark_completed(
+                VoterVerification.Status.SUCCESS, {"reference": reference}
+            )
             _refresh_identity_status(verification.voter_identity)
         elif verified is False:
-            verification.mark_completed(VoterVerification.Status.FAILED, {"reference": reference})
+            verification.mark_completed(
+                VoterVerification.Status.FAILED, {"reference": reference}
+            )
         return verification.status
 
     def complete_verification(self, verification, data=None):
         if verification.status == VoterVerification.Status.SUCCESS:
             return verification
-        raise ValidationError("This provider completes checks synchronously or by its configured callback.")
+        raise ValidationError(
+            "This provider completes checks synchronously or by its configured callback."
+        )
 
 
 def get_verification_provider(method):
@@ -251,7 +285,9 @@ def _refresh_identity_status(identity):
     if not policy:
         return identity
     if policy.verification_method == VotingPolicy.VerificationMethod.COMPOSITE:
-        complete = check_composite_verification(identity, policy.required_verification_methods)
+        complete = check_composite_verification(
+            identity, policy.required_verification_methods
+        )
     elif policy.verification_method == VotingPolicy.VerificationMethod.NONE:
         complete = True
     else:
@@ -271,7 +307,9 @@ def _refresh_identity_status(identity):
     return identity
 
 
-def verify_voter_identity(voter, contest, method, data=None, *, verification=None, complete=False):
+def verify_voter_identity(
+    voter, contest, method, data=None, *, verification=None, complete=False
+):
     """Initiate or complete a configured verification for a contest voter."""
     policy = get_voting_policy(contest)
     if not policy:
@@ -282,12 +320,17 @@ def verify_voter_identity(voter, contest, method, data=None, *, verification=Non
         else [policy.verification_method]
     )
     if method not in required:
-        raise ValidationError({"method": "This method is not required by the contest policy."})
+        raise ValidationError(
+            {"method": "This method is not required by the contest policy."}
+        )
     provider = get_verification_provider(method)
     if complete:
         if not verification:
             raise ResourceNotFoundError("Verification attempt not found.")
-        if verification.voter_identity.user_id != voter.id or verification.voter_identity.contest_id != contest.id:
+        if (
+            verification.voter_identity.user_id != voter.id
+            or verification.voter_identity.contest_id != contest.id
+        ):
             raise ResourceNotFoundError("Verification attempt not found.")
         return provider.complete_verification(verification, data)
     return provider.initiate_verification(voter, contest, data)

@@ -4,6 +4,8 @@ import logging
 from decimal import Decimal
 from typing import Optional
 
+from django.core.exceptions import ImproperlyConfigured, ValidationError
+from django.core.validators import validate_email
 from django.db import transaction
 from django.db.models import F, Q, Sum
 from django.shortcuts import get_object_or_404
@@ -17,9 +19,13 @@ from accounts.models import User
 from accounts.permissions import require_poll_ownership, require_role
 from notifications.email import send_transactional_email
 from notifications.models import Notification
-from payments.models import Transaction, Wallet
-from payments.services import calculate_split, verify_paystack_transaction
-from voting.models import Vote, VoteAuditLog
+from payments.models import Payment
+from payments.services import (
+    confirm_inline_poll_payment,
+    create_inline_poll_payment,
+    verify_paystack_transaction,
+)
+from voting.models import VoteAuditLog
 from voting.services import create_vote, is_rate_limited
 
 from .models import Contestant, Poll
@@ -29,6 +35,7 @@ from .schemas import (
     PollCreateSchema,
     PollSchema,
     PollUpdateSchema,
+    InlineVoteCheckoutSchema,
     VoteSchema,
 )
 
@@ -156,6 +163,46 @@ def get_results(request, slug: str):
     return poll.contestants.order_by("-votes", "name")
 
 
+@router.post("/{slug}/checkout/", response={200: dict, 400: dict, 503: dict})
+def initialize_inline_vote_checkout(request, slug: str, payload: InlineVoteCheckoutSchema):
+    """Create a payment record and return the server-priced InlineJS details."""
+    poll = get_object_or_404(Poll, slug=slug)
+    if not poll.is_paid:
+        return 400, {"success": False, "message": "This poll does not require payment."}
+    if poll.price_per_vote <= 0:
+        return 400, {"success": False, "message": "This paid poll has no valid vote price."}
+    if poll.price_per_vote * payload.quantity > Decimal("999999.99"):
+        return 400, {"success": False, "message": "The checkout amount exceeds the supported payment limit."}
+    if poll.status not in (Poll.Status.ACTIVE, Poll.Status.ENDING_SOON, Poll.Status.NEW):
+        return 400, {"success": False, "message": "This poll is not currently accepting votes."}
+    if poll.ends_at and poll.ends_at <= timezone.now():
+        return 400, {"success": False, "message": "This poll has ended."}
+
+    contestant = get_object_or_404(Contestant, id=payload.contestant_id, poll=poll)
+    email = payload.email.strip() or (
+        request.user.email if getattr(request.user, "is_authenticated", False) else ""
+    )
+    try:
+        validate_email(email)
+    except ValidationError:
+        return 400, {"success": False, "message": "Enter a valid email address."}
+
+    try:
+        return create_inline_poll_payment(
+            poll=poll,
+            contestant=contestant,
+            quantity=payload.quantity,
+            email=email,
+            user=request.user if getattr(request.user, "is_authenticated", False) else None,
+        )
+    except ImproperlyConfigured:
+        logger.exception("Paystack keys are missing for inline poll checkout")
+        return 503, {"success": False, "message": "Online payment is not configured."}
+    except Exception:
+        logger.exception("Could not create inline poll payment")
+        return 503, {"success": False, "message": "Could not initialize checkout. Please try again."}
+
+
 @router.post("/{slug}/contestants/", response={201: ContestantSchema}, auth=JWTAuth())
 @require_poll_ownership
 def add_contestant(
@@ -172,11 +219,6 @@ def add_contestant(
 @router.post("/{slug}/vote/", response={200: dict, 400: dict, 402: dict, 429: dict})
 def vote(request, slug: str, payload: VoteSchema):
     poll = get_object_or_404(Poll, slug=slug)
-    if poll.status not in (Poll.Status.ACTIVE, Poll.Status.ENDING_SOON, Poll.Status.NEW):
-        return 400, {"success": False, "message": "This poll is not currently accepting votes."}
-    if poll.ends_at and poll.ends_at <= timezone.now():
-        return 400, {"success": False, "message": "This poll has ended."}
-
     contestant = get_object_or_404(Contestant, id=payload.contestant_id, poll=poll)
     quantity = payload.quantity
     email = payload.email or (request.user.email if request.user.is_authenticated else "")
@@ -189,22 +231,44 @@ def vote(request, slug: str, payload: VoteSchema):
         VoteAuditLog.objects.create(poll=poll, ip_address=ip, user_agent=user_agent, action="vote_blocked")
         return 429, {"success": False, "message": "Too many votes. Please slow down."}
 
-    total_amount = Decimal(quantity) * poll.price_per_vote if poll.is_paid else Decimal("0")
     if poll.is_paid:
         if not payment_ref:
             return 400, {"success": False, "message": "Payment reference is required for paid polls."}
-        if Vote.objects.filter(payment_ref=payment_ref).exists():
-            return 400, {"success": False, "message": "This payment has already been used."}
-        paystack_data = verify_paystack_transaction(payment_ref)
-        if not paystack_data:
-            return 402, {"success": False, "message": "Payment verification failed."}
-        paid_amount = Decimal(str(paystack_data.get("amount", 0))) / Decimal(100)
-        if paid_amount != total_amount:
-            return 400, {"success": False, "message": "Payment amount does not match the vote total."}
-        if paystack_data.get("currency") != "NGN":
-            return 400, {"success": False, "message": "Payment currency does not match this poll."}
-        if email and paystack_data.get("customer", {}).get("email", "").lower() != email.lower():
+        payment = Payment.objects.filter(provider_reference=payment_ref).first()
+        metadata = (payment.metadata or {}) if payment else {}
+        if (
+            not payment
+            or metadata.get("flow") != "inline_poll_vote"
+            or metadata.get("poll_id") != str(poll.pk)
+            or metadata.get("contestant_id") != str(contestant.pk)
+            or metadata.get("quantity") != quantity
+        ):
+            return 400, {"success": False, "message": "Payment reference does not match this vote."}
+        if email and email.lower() != payment.email.lower():
             return 400, {"success": False, "message": "Payment email does not match the voter email."}
+        email = payment.email
+
+        if payment.status == Payment.Status.CONFIRMED and payment.processed:
+            return {"success": True, "message": "Vote already confirmed.", "transaction_ref": payment_ref}
+
+        paystack_data = verify_paystack_transaction(payment_ref)
+        if not paystack_data or paystack_data.get("reference") != payment_ref:
+            return 402, {"success": False, "message": "Payment verification failed."}
+        outcome = confirm_inline_poll_payment(paystack_data, request=request)
+        if outcome not in ("confirmed", "duplicate"):
+            return 402, {"success": False, "message": "Payment could not be confirmed for this vote."}
+        return {
+            "success": True,
+            "message": "Vote cast successfully" if outcome == "confirmed" else "Vote already confirmed.",
+            "transaction_ref": payment_ref,
+        }
+
+    if poll.status not in (Poll.Status.ACTIVE, Poll.Status.ENDING_SOON, Poll.Status.NEW):
+        return 400, {"success": False, "message": "This poll is not currently accepting votes."}
+    if poll.ends_at and poll.ends_at <= timezone.now():
+        return 400, {"success": False, "message": "This poll has ended."}
+
+    total_amount = Decimal("0")
 
     with transaction.atomic():
         Contestant.objects.filter(id=contestant.id).update(votes=F("votes") + quantity)
@@ -214,27 +278,12 @@ def vote(request, slug: str, payload: VoteSchema):
             voter=request.user if request.user.is_authenticated else None,
             voter_email=email,
             quantity=quantity,
-            payment_ref=payment_ref if poll.is_paid else "",
+            payment_ref="",
             ip=ip,
             user_agent=user_agent,
-            is_paid=poll.is_paid,
+            is_paid=False,
             amount=total_amount,
         )
-
-        if poll.is_paid:
-            _, creator_earnings = calculate_split(total_amount)
-            wallet, _created = Wallet.objects.select_for_update().get_or_create(user=poll.creator)
-            wallet.balance += Decimal(str(creator_earnings))
-            wallet.lifetime_earnings += Decimal(str(creator_earnings))
-            wallet.save(update_fields=["balance", "lifetime_earnings"])
-            Transaction.objects.create(
-                user=poll.creator,
-                description=f"Earnings from poll: {poll.title}",
-                amount=Decimal(str(creator_earnings)),
-                status=Transaction.Status.COMPLETED,
-                type=Transaction.Type.EARNING,
-                metadata={"poll_id": str(poll.id), "payment_ref": payment_ref},
-            )
 
         notification = Notification.objects.create(
             receiver=poll.creator,

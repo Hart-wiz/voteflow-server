@@ -5,6 +5,7 @@ Environment variables are loaded from .env via python-decouple.
 Authentication powered by django-ninja-jwt.
 """
 
+import re
 from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
 
@@ -120,6 +121,9 @@ else:
             "PASSWORD": config("DB_PASSWORD", default=""),
             "HOST": config("DB_HOST", default="localhost"),
             "PORT": config("DB_PORT", default="5432"),
+            # Supabase requires TLS. Local PostgreSQL can keep libpq's default
+            # behavior by leaving DB_SSLMODE at "prefer".
+            "OPTIONS": {"sslmode": config("DB_SSLMODE", default="prefer")},
         }
     }
 
@@ -154,10 +158,28 @@ NINJA_JWT = {
 # ---------------------------------------------------------------------------
 # CORS
 # ---------------------------------------------------------------------------
-CORS_ALLOWED_ORIGINS = [
-    config("FRONTEND_URL", default="http://localhost:3000"),
+FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:3000").rstrip("/")
+CLOUDFLARE_PAGES_DOMAIN = config(
+    "CLOUDFLARE_PAGES_DOMAIN", default="voteflow-client.pages.dev"
+).strip().lower()
+CLOUDFLARE_PAGES_ORIGIN = f"https://{CLOUDFLARE_PAGES_DOMAIN}"
+
+# Allow the configured client origin plus the project's production Pages URL.
+# Cloudflare preview deployments use a subdomain of the project pages.dev host.
+CORS_ALLOWED_ORIGINS = list(dict.fromkeys([FRONTEND_URL, CLOUDFLARE_PAGES_ORIGIN]))
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    rf"^https://(?:[a-z0-9-]+\.)?{re.escape(CLOUDFLARE_PAGES_DOMAIN)}$",
 ]
 CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = list(
+    dict.fromkeys(
+        [
+            FRONTEND_URL,
+            CLOUDFLARE_PAGES_ORIGIN,
+            f"https://*.{CLOUDFLARE_PAGES_DOMAIN}",
+        ]
+    )
+)
 
 # ---------------------------------------------------------------------------
 # Internationalization
@@ -198,14 +220,15 @@ STORAGES = {
 # Paystack
 # ---------------------------------------------------------------------------
 PAYSTACK_SECRET_KEY = config("PAYSTACK_SECRET_KEY", default="")
+PAYSTACK_PUBLIC_KEY = config("PAYSTACK_PUBLIC_KEY", default="")
 
-# Redis backs cross-worker rate limits and the periodic task queue when set.
-REDIS_URL = config("REDIS_URL", default="")
-if REDIS_URL:
+# Dragonfly speaks the Redis protocol used by Django's cache and Celery.
+DRAGONFLY_URL = config("DRAGONFLY_URL", default="")
+if DRAGONFLY_URL:
     CACHES = {
         "default": {
             "BACKEND": "django.core.cache.backends.redis.RedisCache",
-            "LOCATION": REDIS_URL,
+            "LOCATION": DRAGONFLY_URL,
         }
     }
 else:
@@ -217,9 +240,11 @@ else:
     }
 
 CELERY_BROKER_URL = config(
-    "CELERY_BROKER_URL", default=REDIS_URL or "redis://localhost:6379/0"
+    "CELERY_BROKER_URL", default=DRAGONFLY_URL or "redis://localhost:6379/0"
 )
-CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default=CELERY_BROKER_URL)
+CELERY_RESULT_BACKEND = config(
+    "CELERY_RESULT_BACKEND", default=DRAGONFLY_URL or CELERY_BROKER_URL
+)
 CELERY_TIMEZONE = "UTC"
 CELERY_BEAT_SCHEDULE = {
     "expire-vote-attempts-every-five-minutes": {

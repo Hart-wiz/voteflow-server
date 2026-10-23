@@ -136,3 +136,9 @@ class VoteSchema(Schema):
     quantity: int = Field(default=1, ge=1, le=1000)
     email: Optional[str] = ""
     payment_ref: Optional[str] = ""
+
+
+class InlineVoteCheckoutSchema(Schema):
+    contestant_id: UUID
+    quantity: int = Field(default=1, ge=1, le=1000)
+    email: str = Field(min_length=3, max_length=254)
