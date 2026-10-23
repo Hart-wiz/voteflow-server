@@ -58,6 +58,16 @@ uv run celery -A config beat --loglevel info
 
 Before deployment, collect Django admin and app assets with `uv run python manage.py collectstatic --noinput`. They are written to `staticfiles/` (`STATIC_ROOT`); configure the hosting platform or web server to serve the `/static/` URL from that directory. Generated static files are ignored by Git.
 
+### Render web service
+
+Use this build command:
+
+```sh
+uv sync --frozen && uv run python manage.py collectstatic --noinput
+```
+
+Use `uv run gunicorn config.wsgi:application` as the Render start command. Gunicorn is a production dependency in `pyproject.toml` and is pinned by `uv.lock`; `uv run` invokes the executable from the project's environment. Add the required environment variables from `.env.example` in the Render service settings. Set `ALLOWED_HOSTS` to include the service's `.onrender.com` hostname and set `FRONTEND_URL` to the deployed client origin.
+
 Start Dragonfly before the Django server and Celery processes. For local development, you can start it with Docker:
 
 ```sh
