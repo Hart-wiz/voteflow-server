@@ -18,7 +18,7 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import IntegrityError
-from django.http import Http404, JsonResponse
+from django.http import Http404, JsonResponse, HttpResponse
 from django.urls import path
 from ninja import NinjaAPI
 
@@ -93,6 +93,7 @@ api_v1_patterns = [
 ]
 
 urlpatterns = [
+    path("health/", lambda request: HttpResponse("ok"))
     path("admin/", admin.site.urls),
     path("api/v1/", api.urls),
     # Spec routes use /api/...; retain /api/v1/... for the shipped client.
