@@ -6,7 +6,8 @@ Authentication powered by django-ninja-jwt.
 """
 
 import re
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from pathlib import Path
 
 from decouple import config
@@ -63,6 +64,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "ninja.compatibility.files.fix_request_files_middleware",
@@ -159,14 +161,22 @@ NINJA_JWT = {
 # CORS
 # ---------------------------------------------------------------------------
 FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:3000").rstrip("/")
-CLOUDFLARE_PAGES_DOMAIN = config(
-    "CLOUDFLARE_PAGES_DOMAIN", default="voteflow-client.pages.dev"
-).strip().lower()
+CLOUDFLARE_PAGES_DOMAIN = (
+    config("CLOUDFLARE_PAGES_DOMAIN", default="voteflow-client.pages.dev")
+    .strip()
+    .lower()
+)
 CLOUDFLARE_PAGES_ORIGIN = f"https://{CLOUDFLARE_PAGES_DOMAIN}"
+CLOUDFLARE_WORKERS_ORIGIN = config(
+    "CLOUDFLARE_WORKERS_ORIGIN",
+    default="https://voteflow-client.voteflow-test.workers.dev",
+).rstrip("/")
 
-# Allow the configured client origin plus the project's production Pages URL.
-# Cloudflare preview deployments use a subdomain of the project pages.dev host.
-CORS_ALLOWED_ORIGINS = list(dict.fromkeys([FRONTEND_URL, CLOUDFLARE_PAGES_ORIGIN]))
+# Allow the configured client origin and both configured Cloudflare deployment URLs.
+# Cloudflare Pages previews use a subdomain of the project's pages.dev host.
+CORS_ALLOWED_ORIGINS = list(
+    dict.fromkeys([FRONTEND_URL, CLOUDFLARE_PAGES_ORIGIN, CLOUDFLARE_WORKERS_ORIGIN])
+)
 CORS_ALLOWED_ORIGIN_REGEXES = [
     rf"^https://(?:[a-z0-9-]+\.)?{re.escape(CLOUDFLARE_PAGES_DOMAIN)}$",
 ]
@@ -176,6 +186,7 @@ CSRF_TRUSTED_ORIGINS = list(
         [
             FRONTEND_URL,
             CLOUDFLARE_PAGES_ORIGIN,
+            CLOUDFLARE_WORKERS_ORIGIN,
             f"https://*.{CLOUDFLARE_PAGES_DOMAIN}",
         ]
     )
@@ -193,6 +204,7 @@ USE_TZ = True
 # Static & Media Files
 # ---------------------------------------------------------------------------
 STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
@@ -261,7 +273,11 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 API_SUNSET_AT = datetime.fromisoformat(
-    config("API_SUNSET_AT", default=(datetime.now(dt_timezone.utc) + timedelta(days=30)).date().isoformat() + "T00:00:00+00:00")
+    config(
+        "API_SUNSET_AT",
+        default=(datetime.now(dt_timezone.utc) + timedelta(days=30)).date().isoformat()
+        + "T00:00:00+00:00",
+    )
 )
 
 # ---------------------------------------------------------------------------
