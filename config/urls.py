@@ -93,7 +93,7 @@ api_v1_patterns = [
 ]
 
 urlpatterns = [
-    path("health/", lambda request: HttpResponse("ok"))
+    path("health/", lambda request: HttpResponse("ok")),
     path("admin/", admin.site.urls),
     path("api/v1/", api.urls),
     # Spec routes use /api/...; retain /api/v1/... for the shipped client.
